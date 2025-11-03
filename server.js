@@ -1,4 +1,4 @@
-// ============== SERVIDOR BACKEND VINTEX CLINIC (VERSIÓN 3.0.4 - DB FIX) =============
+// ============== SERVIDOR BACKEND VINTEX CLINIC (VERSIÓN 3.0.5 - DIAGNÓSTICO RLS) =============
 //
 // ARQUITECTURA:
 // - FASE A: Modular (Compatible con frontend modular)
@@ -8,10 +8,11 @@
 // - FIX: Incluye ruta GET / para Health Check (evita SIGTERM en EasyPanel)
 // - FIX 2: Usa la Clave de Servicio (SERVICE_KEY) para bypassear RLS
 // - FIX 3: Corregido el nombre de columna 'fecha_cita' a 'fecha_hora'
+// - FIX 4: Añadidos logs de diagnóstico para variables de entorno
 //
 // =======================================================================================
 
-// 1. IMPORTACIÓN DE MÓDulos
+// 1. IMPORTACIÓN DE MÓDULOS
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -21,22 +22,41 @@ const bcrypt = require('bcryptjs');
 const { z } = require('zod');
 const rateLimit = require('express-rate-limit');
 
-// 2. CONFIGURACIÓN INICIAL
+// 2. CONFIGURACIÓN INICIAL Y DIAGNÓSTICO
 const app = express();
 app.set('trust proxy', 1); 
 const port = process.env.PORT || 80; 
 
+console.log("--- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---");
+
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) { console.error("Error: JWT_SECRET debe estar definida."); process.exit(1); }
+if (!JWT_SECRET) {
+    console.error("❌ ERROR: JWT_SECRET no está definida.");
+} else {
+    console.log("✅ JWT_SECRET cargado correctamente.");
+}
+
 const supabaseUrl = process.env.SUPABASE_URL;
+if (!supabaseUrl) {
+    console.error("❌ ERROR: SUPABASE_URL no está definida.");
+} else {
+    console.log("✅ SUPABASE_URL cargada:", supabaseUrl);
+}
 
 // Usamos la Clave de Servicio
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
-if (!supabaseUrl || !supabaseServiceKey) { 
-    console.error("Error: SUPABASE_URL y SUPABASE_SERVICE_KEY deben estar definidas."); 
+if (!supabaseServiceKey) { 
+    console.error("❌ ERROR CRÍTICO: SUPABASE_SERVICE_KEY no está definida."); 
+    console.log("   (La aplicación no funcionará. Asegúrate de añadirla en EasyPanel)");
     process.exit(1); 
+} else {
+    console.log("✅ SUPABASE_SERVICE_KEY cargada correctamente.");
+    console.log("   (Comprueba que este valor NO sea la 'anon' key)");
 }
+
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
+console.log("--- Cliente Supabase creado con Clave de Servicio ---");
+// ==========================================================
 
 
 // 3. MIDDLEWARE
@@ -84,7 +104,6 @@ const timeRegex = /^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
 const fechaHoraRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z?$/; // Acepta ISO UTC
 
 const citaBaseSchema = z.object({
-    // **¡CORREGIDO!** El frontend envía 'fecha_hora'
     fecha_hora: z.string().regex(fechaHoraRegex, "Formato ISO-8601 (UTC)"),
     timezone: z.string().optional(),
     descripcion: z.string().optional().nullable(),
@@ -167,7 +186,9 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
 // --- Endpoint /initial-data (FASE B - Optimizado) ---
 app.get('/api/initial-data', authenticateToken, async (req, res) => {
+    console.log("-> Recibida petición en /api/initial-data");
     try {
+        // La Service Key nos da permiso para leer estas tablas
         const [
             { data: doctors, error: doctorsError },
             { data: clients, error: clientsError },
@@ -178,11 +199,20 @@ app.get('/api/initial-data', authenticateToken, async (req, res) => {
             supabase.from('n8n_chat_histories').select('id, session_id, message')
         ]);
 
-        if (doctorsError || clientsError || chatError) {
-            console.error("Error en initial-data:", doctorsError || clientsError || chatError);
-            throw (doctorsError || clientsError || chatError);
+        if (doctorsError) {
+            console.error("Error en sub-consulta (doctores):", doctorsError.message);
+            throw doctorsError;
         }
-
+        if (clientsError) {
+            console.error("Error en sub-consulta (clientes):", clientsError.message);
+            throw clientsError;
+        }
+        if (chatError) {
+            console.error("Error en sub-consulta (chat):", chatError.message);
+            throw chatError;
+        }
+        
+        console.log(`✅ /api/initial-data: Doctores encontrados: ${doctors.length}`);
         res.status(200).json({ doctors, clients, chatHistory });
 
     } catch (error) {
@@ -191,13 +221,10 @@ app.get('/api/initial-data', authenticateToken, async (req, res) => {
     }
 });
 
-// --- [FIX] Ruta de compatibilidad para /api/citas ---
-// Esta ruta es la que fallaba con 500.
+// --- Ruta de compatibilidad para /api/citas ---
 app.get('/api/citas', authenticateToken, async (req, res) => {
-    console.log("Se está usando la ruta /api/citas (ineficiente). Considerar migrar a /api/citas-range.");
+    console.log("-> Recibida petición en /api/citas");
     try {
-        // **¡AQUÍ ESTÁ LA CORRECCIÓN!**
-        // Cambiamos 'fecha_cita' por 'fecha_hora'
         const { data, error } = await supabase.from('citas')
             .select(`
                 id, fecha_hora, timezone, descripcion, estado, duracion_minutos,
@@ -209,6 +236,7 @@ app.get('/api/citas', authenticateToken, async (req, res) => {
             console.error("Error de Supabase en /api/citas:", error.message);
             throw error;
         }
+        console.log(`✅ /api/citas: Citas encontradas: ${data.length}`);
         res.status(200).json(data);
     } catch (error) {
         console.error(`Error en /api/citas: ${error.message}`);
@@ -303,7 +331,7 @@ app.post('/api/citas', authenticateToken, async (req, res) => {
             .insert({
                 cliente_id: clienteId,
                 doctor_id: validatedData.doctor_id,
-                fecha_hora: validatedData.fecha_hora, // **¡CORREGIDO!**
+                fecha_hora: validatedData.fecha_hora,
                 timezone: validatedData.timezone || null, 
                 descripcion: validatedData.descripcion,
                 estado: validatedData.estado,
@@ -373,4 +401,27 @@ app.delete('/api/citas/:id', authenticateToken, async (req, res) => {
 app.listen(port, () => {
     console.log(`Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:${port}`);
 });
+```
+
+**Qué espero que veas en los LOGS de EasyPanel:**
+
+Si todo está bien, deberías ver esto:
+```
+--- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
+✅ JWT_SECRET cargado correctamente.
+✅ SUPABASE_URL cargada: https://ahjsazdgcwkgqkoylqps.supabase.co
+✅ SUPABASE_SERVICE_KEY cargada correctamente.
+   (Comprueba que este valor NO sea la 'anon' key)
+--- Cliente Supabase creado con Clave de Servicio ---
+Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:80
+```
+
+Si ves esto, **refresca tu `clinica.html`** y la agenda debería cargar.
+
+Si, en cambio, ves esto en los logs:
+```
+--- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
+...
+❌ ERROR CRÍTICO: SUPABASE_SERVICE_KEY no está definida.
+   (La aplicación no funcionará. Asegúrate de añadirla en EasyPanel)
 
