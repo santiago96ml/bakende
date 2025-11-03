@@ -403,25 +403,18 @@ app.listen(port, () => {
 });
 ```
 
-**Qué espero que veas en los LOGS de EasyPanel:**
+**Paso 4: Comprueba los Logs del Servidor**
 
-Si todo está bien, deberías ver esto:
-```
---- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
-✅ JWT_SECRET cargado correctamente.
-✅ SUPABASE_URL cargada: https://ahjsazdgcwkgqkoylqps.supabase.co
-✅ SUPABASE_SERVICE_KEY cargada correctamente.
-   (Comprueba que este valor NO sea la 'anon' key)
---- Cliente Supabase creado con Clave de Servicio ---
-Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:80
-```
+1.  Reinicia el servidor en EasyPanel.
+2.  Ve a la pestaña "Logs".
+3.  Deberías ver esto:
 
-Si ves esto, **refresca tu `clinica.html`** y la agenda debería cargar.
-
-Si, en cambio, ves esto en los logs:
-```
---- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
-...
-❌ ERROR CRÍTICO: SUPABASE_SERVICE_KEY no está definida.
-   (La aplicación no funcionará. Asegúrate de añadirla en EasyPanel)
+    ```
+    --- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
+    ✅ JWT_SECRET cargado correctamente.
+    ✅ SUPABASE_URL cargada: https://ahjsazdgcwkgqkoylqps.supabase.co
+    ✅ SUPABASE_SERVICE_KEY cargada correctamente.
+    --- Cliente Supabase creado con Clave de Servicio ---
+    Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:80
+    
 
