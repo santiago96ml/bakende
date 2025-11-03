@@ -412,7 +412,7 @@ app.listen(port, () => {
     ```
     --- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
     ✅ JWT_SECRET cargado correctamente.
-    ✅ SUPABASE_URL cargada: https://ahjsazdgcwkgqkoylqps.supabase.co
+    ✅ SUPABASE_URL cargada:Correcta.
     ✅ SUPABASE_SERVICE_KEY cargada correctamente.
     --- Cliente Supabase creado con Clave de Servicio ---
     Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:80
