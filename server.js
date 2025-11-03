@@ -5,7 +5,6 @@
 // - FASE B: Rate Limiting (express-rate-limit) y Carga por Rango (/citas-range)
 // - FASE C: Storage (4 endpoints) y Real-time (hooks)
 // - ESQUEMA: Validado para IDs BIGINT/SERIAL (z.number())
-// - FIX: Incluye ruta GET / para Health Check (evita SIGTERM en EasyPanel)
 // - FIX 2: Usa la Clave de Servicio (SERVICE_KEY) para bypassear RLS
 // - FIX 3: Corregido el nombre de columna 'fecha_cita' a 'fecha_hora'
 // - FIX 4: Añadidos logs de diagnóstico para variables de entorno
@@ -39,6 +38,7 @@ if (!JWT_SECRET) {
 const supabaseUrl = process.env.SUPABASE_URL;
 if (!supabaseUrl) {
     console.error("❌ ERROR: SUPABASE_URL no está definida.");
+    process.exit(1); 
 } else {
     console.log("✅ SUPABASE_URL cargada:", supabaseUrl);
 }
@@ -51,7 +51,7 @@ if (!supabaseServiceKey) {
     process.exit(1); 
 } else {
     console.log("✅ SUPABASE_SERVICE_KEY cargada correctamente.");
-    console.log("   (Comprueba que este valor NO sea la 'anon' key)");
+    console.log("   (Debe ser la Service Role Key para ignorar RLS)");
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -401,20 +401,3 @@ app.delete('/api/citas/:id', authenticateToken, async (req, res) => {
 app.listen(port, () => {
     console.log(`Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:${port}`);
 });
-```
-
-**Paso 4: Comprueba los Logs del Servidor**
-
-1.  Reinicia el servidor en EasyPanel.
-2.  Ve a la pestaña "Logs".
-3.  Deberías ver esto:
-
-    ```
-    --- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---
-    ✅ JWT_SECRET cargado correctamente.
-    ✅ SUPABASE_URL cargada:Correcta.
-    ✅ SUPABASE_SERVICE_KEY cargada correctamente.
-    --- Cliente Supabase creado con Clave de Servicio ---
-    Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:80
-    
-
