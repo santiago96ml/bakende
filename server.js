@@ -1,8 +1,8 @@
-// ============== SERVIDOR BACKEND VINTEX CLINIC (VERSIÓN 3.0.5 - DIAGNÓSTICO RLS) =============
+// ============== SERVIDOR BACKEND VINTEX CLINIC (v3.1 - ENDPOINT UNIFICADO) =============
 //
 // ARQUITECTURA:
 // - FASE A: Modular (Compatible con frontend modular)
-// - FASE B: Rate Limiting (express-rate-limit) y Carga por Rango (/citas-range)
+// - FASE B: Endpoint /api/citas unificado (maneja 'all' y 'range')
 // - FASE C: Storage (4 endpoints) y Real-time (hooks)
 // - ESQUEMA: Validado para IDs BIGINT/SERIAL (z.number())
 // - FIX 2: Usa la Clave de Servicio (SERVICE_KEY) para bypassear RLS
@@ -26,354 +26,328 @@ const app = express();
 app.set('trust proxy', 1); 
 const port = process.env.PORT || 80; 
 
-console.log("--- INICIANDO SERVIDOR VINTEX v3.0.5 (DIAGNÓSTICO) ---");
+console.log("--- INICIANDO SERVIDOR VINTEX (v3.1) ---");
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-    console.error("❌ ERROR: JWT_SECRET no está definida.");
+// Diagnóstico de variables de entorno
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+    console.error("ERROR CRÍTICO: SUPABASE_URL o SUPABASE_SERVICE_KEY no están definidas.");
+    console.log("Asegúrate de que el archivo .env esté presente y configurado.");
 } else {
-    console.log("✅ JWT_SECRET cargado correctamente.");
+    console.log("✅ Variables de entorno cargadas (URL existe).");
 }
+if (!process.env.JWT_SECRET) console.warn("ADVERTENCIA: JWT_SECRET no definida. Usando valor inseguro.");
 
-const supabaseUrl = process.env.SUPABASE_URL;
-if (!supabaseUrl) {
-    console.error("❌ ERROR: SUPABASE_URL no está definida.");
-    process.exit(1); 
-} else {
-    console.log("✅ SUPABASE_URL cargada:", supabaseUrl);
-}
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY; // Clave de SERVICIO
+const JWT_SECRET = process.env.JWT_SECRET || 'tu_secreto_jwt_inseguro_por_defecto';
 
-// Usamos la Clave de Servicio
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
-if (!supabaseServiceKey) { 
-    console.error("❌ ERROR CRÍTICO: SUPABASE_SERVICE_KEY no está definida."); 
-    console.log("   (La aplicación no funcionará. Asegúrate de añadirla en EasyPanel)");
-    process.exit(1); 
-} else {
-    console.log("✅ SUPABASE_SERVICE_KEY cargada correctamente.");
-    console.log("   (Debe ser la Service Role Key para ignorar RLS)");
-}
+// 3. INICIALIZACIÓN DE SUPABASE (CON CLAVE DE SERVICIO)
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+console.log("✅ Cliente de Supabase (Service Role) inicializado.");
 
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
-console.log("--- Cliente Supabase creado con Clave de Servicio ---");
-// ==========================================================
-
-
-// 3. MIDDLEWARE
+// 4. MIDDLEWARES GENERALES
 app.use(cors());
 app.use(express.json());
 
-// [FIX] RUTA DE HEALTH CHECK (Para EasyPanel / Plataformas)
-app.get('/', (req, res) => {
-    res.status(200).json({ 
-        status: 'ok', 
-        message: 'Servidor Vintex v3.0 (SCALABLE) está en línea.' 
-    });
-});
-
-// --- MIDDLEWARE DE SEGURIDAD (FASE B) ---
-const apiLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 200, 
-    message: 'Demasiadas peticiones desde esta IP, por favor intente de nuevo en 15 minutos.',
-});
-app.use('/api/', apiLimiter);
-
+// 5. MIDDLEWARE DE SEGURIDAD (Rate Limiting)
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 10, 
-    message: 'Demasiados intentos de login, por favor intente de nuevo en 15 minutos.',
+    max: 10, // Límite de 10 intentos por IP
+    message: 'Demasiados intentos de inicio de sesión. Intente de nuevo en 15 minutos.',
+    standardHeaders: true, 
+    legacyHeaders: false, 
 });
 
-const authenticateToken = (req, res, next) => {
+const apiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minuto
+    max: 100, // Límite de 100 peticiones por minuto por IP
+    message: 'Demasiadas peticiones a la API. Intente más tarde.',
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.use('/api/', apiLimiter); // Aplicar a todas las rutas de la API
+console.log("✅ Middlewares (CORS, JSON, Rate Limit) configurados.");
+
+// 6. MIDDLEWARE DE AUTENTICACIÓN (JWT)
+function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.status(401).json({ error: 'Token no proporcionado' });
+    const token = authHeader && authHeader.split(' ')[1]; // "Bearer TOKEN"
+
+    if (token == null) {
+        return res.status(401).json({ error: 'Acceso denegado: No se proporcionó token.' });
+    }
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) { console.warn("Token JWT inválido:", err.message); return res.status(403).json({ error: 'Token inválido' }); }
-        req.user = user; 
+        if (err) {
+            console.warn(`Token JWT inválido: ${err.message}`);
+            // Manejo de errores específicos
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: 'Token expirado.', code: 'TOKEN_EXPIRED' });
+            }
+            return res.status(403).json({ error: 'Token inválido.' });
+        }
+        req.user = user;
         next();
     });
-};
+}
 
-// 4. ESQUEMAS DE VALIDACIÓN ZOD
+// 7. ESQUEMAS DE VALIDACIÓN (ZOD)
+const idSchema = z.number().int().positive();
+const loginSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+}).strict();
 
-const idSchema = z.number().int().positive("El ID debe ser un número positivo.");
-const timeRegex = /^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
-const fechaHoraRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z?$/; // Acepta ISO UTC
+// <-- CAMBIO CLAVE: Esquema para validar el rango (si se provee) -->
+const citasRangeSchema = z.object({
+    start: z.string().datetime(), // ISO 8601
+    end: z.string().datetime(),   // ISO 8601
+}).strict();
 
 const citaBaseSchema = z.object({
-    fecha_hora: z.string().regex(fechaHoraRegex, "Formato ISO-8601 (UTC)"),
-    timezone: z.string().optional(),
-    descripcion: z.string().optional().nullable(),
-    estado: z.enum(['programada', 'confirmada', 'cancelada', 'completada', 'no_asistio']).default('programada'),
-    duracion_minutos: z.number().int().positive().default(30),
     doctor_id: idSchema,
+    fecha_hora: z.string().datetime(),
+    timezone: z.string(),
+    descripcion: z.string().optional(),
+    duracion_minutos: z.number().int().positive(),
+    estado: z.enum(['programada', 'confirmada', 'cancelada', 'completada', 'no_asistio']),
 });
 
-const citaCreateSchema = citaBaseSchema.extend({
-    cliente_id: idSchema.optional().nullable(),
-    new_client_name: z.string().optional().nullable(),
-    new_client_dni: z.string().optional().nullable(),
-    new_client_telefono: z.string().optional().nullable(),
-});
+const nuevaCitaSchema = citaBaseSchema.extend({
+    cliente_id: idSchema.optional(),
+    new_client_name: z.string().optional(),
+    new_client_dni: z.string().optional(),
+    new_client_telefono: z.string().optional(),
+}).strict();
 
-const citaUpdateSchema = citaBaseSchema.partial().omit({ estado: true }).extend({
-    estado: z.enum(['programada', 'confirmada', 'cancelada', 'completada', 'no_asistio']).optional()
-});
+const updateCitaSchema = citaBaseSchema.partial(); // Todos los campos son opcionales
+
+const clienteSchema = z.object({
+    activo: z.boolean().optional(),
+    solicitud_de_secretaría: z.boolean().optional(),
+}).partial().strict(); // Solo permite actualizar estos campos
 
 const doctorSchema = z.object({
-    nombre: z.string().min(2, "Nombre inválido"),
+    nombre: z.string().min(3).optional(),
     especialidad: z.string().optional().nullable(),
-    horario_inicio: z.string().regex(timeRegex, "Formato HH:MM o HH:MM:SS"),
-    horario_fin: z.string().regex(timeRegex, "Formato HH:MM o HH:MM:SS"),
-    activo: z.boolean().default(true)
-});
-
-const clienteUpdateSchema = z.object({
     activo: z.boolean().optional(),
-    solicitud_de_secretaría: z.boolean().optional()
+    horario_inicio: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).optional().nullable(), // Formato HH:MM o HH:MM:SS
+    horario_fin: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).optional().nullable(),
+}).strict();
+
+const updateDoctorSchema = doctorSchema.partial(); // Todos opcionales
+
+
+// =======================================================================================
+// 8. ENDPOINTS DE LA API
+// =======================================================================================
+
+// --- HEALTH CHECK (Para EasyPanel) ---
+app.get('/', (req, res) => {
+    res.status(200).send('Vintex Clinic Backend (v3.1) [Endpoint Unificado] - ¡Operativo!');
 });
 
-
-// 5. ENDPOINTS DE LA API
-
-// --- Endpoint de Login ---
+// --- AUTENTICACIÓN ---
 app.post('/api/login', loginLimiter, async (req, res) => {
+    console.log("-> Recibida petición en /api/login");
     try {
-        const schema = z.object({
-            email: z.string().email({ message: "Email inválido" }),
-            password: z.string().min(1, { message: "La contraseña es requerida" })
-        });
-        const validatedData = schema.safeParse(req.body);
-        if (!validatedData.success) return res.status(400).json({ error: 'Datos de login inválidos', details: validatedData.error.errors });
-
-        const { email, password } = validatedData.data;
+        const { email, password } = loginSchema.parse(req.body);
 
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('id, nombre, rol, password_hash')
+            .select('id, email, password_hash, rol')
             .eq('email', email)
             .single();
 
         if (error || !user) {
-            console.error('Error en login (usuario no encontrado):', error?.message);
-            return res.status(404).json({ error: 'Usuario no encontrado' });
+            return res.status(401).json({ error: 'Credenciales inválidas.' });
         }
 
-        const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-        if (!isPasswordValid) return res.status(401).json({ error: 'Credenciales inválidas' });
+        const isValid = await bcrypt.compare(password, user.password_hash);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Credenciales inválidas.' });
+        }
 
-        const tokenPayload = { 
-            id: user.id, 
-            rol: user.rol, 
-            nombre: user.nombre 
-        };
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '8h' });
-        
-        res.status(200).json({ 
-            message: 'Login exitoso', 
-            token: token, 
-            user: { id: user.id, nombre: user.nombre, rol: user.rol } 
-        });
+        const token = jwt.sign(
+            { id: user.id, email: user.email, rol: user.rol },
+            JWT_SECRET,
+            { expiresIn: '8h' } // Duración del token
+        );
 
-    } catch (error) { 
-        console.error("Error crítico en /api/login:", error.message); 
-        res.status(500).json({ error: 'Error interno del servidor', details: error.message }); 
+        console.log(`✅ Login exitoso para ${user.email}`);
+        res.status(200).json({ token, user: { id: user.id, email: user.email, rol: user.rol } });
+
+    } catch (error) {
+        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de login inválidos', details: error.errors });
+        console.error("Error en login:", error.message);
+        res.status(500).json({ error: 'Error interno del servidor.', details: error.message });
     }
 });
 
-// --- Endpoint /initial-data (FASE B - Optimizado) ---
+// --- DATOS INICIALES (Carga la App) ---
 app.get('/api/initial-data', authenticateToken, async (req, res) => {
     console.log("-> Recibida petición en /api/initial-data");
     try {
-        // La Service Key nos da permiso para leer estas tablas
-        const [
-            { data: doctors, error: doctorsError },
-            { data: clients, error: clientsError },
-            { data: chatHistory, error: chatError }
-        ] = await Promise.all([
-            supabase.from('doctores').select('id, nombre, especialidad, horario_inicio, horario_fin, activo'),
-            supabase.from('clientes').select('id, nombre, telefono, dni, activo, solicitud_de_secretaría'),
-            supabase.from('n8n_chat_histories').select('id, session_id, message')
+        const [doctores, clientes, chatHistory] = await Promise.all([
+            supabase.from('doctores').select('*').order('nombre', { ascending: true }),
+            supabase.from('clientes').select('*').order('nombre', { ascending: true }),
+            supabase.from('n8n_chat_histories').select('*').order('id', { ascending: false }).limit(500)
         ]);
 
-        if (doctorsError) {
-            console.error("Error en sub-consulta (doctores):", doctorsError.message);
-            throw doctorsError;
-        }
-        if (clientsError) {
-            console.error("Error en sub-consulta (clientes):", clientsError.message);
-            throw clientsError;
-        }
-        if (chatError) {
-            console.error("Error en sub-consulta (chat):", chatError.message);
-            throw chatError;
-        }
-        
-        console.log(`✅ /api/initial-data: Doctores encontrados: ${doctors.length}`);
-        res.status(200).json({ doctors, clients, chatHistory });
+        if (doctores.error) throw doctores.error;
+        if (clientes.error) throw clientes.error;
+        if (chatHistory.error) throw chatHistory.error;
 
+        console.log(`✅ /api/initial-data: Doctores: ${doctores.data.length}, Clientes: ${clientes.data.length}, Chat: ${chatHistory.data.length}`);
+        res.status(200).json({
+            doctors: doctores.data,
+            clients: clientes.data,
+            chatHistory: chatHistory.data
+        });
     } catch (error) {
-        console.error("Error fatal al obtener initial-data:", error.message);
-        res.status(500).json({ error: 'No se pudo obtener la data inicial.', details: error.message });
+        console.error("Error al obtener datos iniciales:", error.message);
+        res.status(500).json({ error: 'No se pudieron cargar los datos iniciales.', details: error.message });
     }
 });
 
-// --- Ruta de compatibilidad para /api/citas ---
+// =======================================================================================
+// --- GESTIÓN DE CITAS (CRUD) ---
+// =======================================================================================
+
+// <-- CAMBIO CLAVE: Endpoint GET /api/citas UNIFICADO -->
+// Si se proveen 'start' y 'end' en la query, filtra por rango.
+// Si no, devuelve todas las citas.
 app.get('/api/citas', authenticateToken, async (req, res) => {
-    console.log("-> Recibida petición en /api/citas");
+    const { start, end } = req.query;
+
     try {
-        const { data, error } = await supabase.from('citas')
+        // Construcción base de la consulta
+        let query = supabase
+            .from('citas')
             .select(`
-                id, fecha_hora, timezone, descripcion, estado, duracion_minutos,
+                id, fecha_hora, descripcion, estado, duracion_minutos, timezone,
                 cliente:clientes (id, nombre, dni),
-                doctor:doctores (id, nombre, especialidad)
-            `);
-        
-        if (error) {
-            console.error("Error de Supabase en /api/citas:", error.message);
-            throw error;
+                doctor:doctores (id, nombre, especialidad, activo, horario_inicio, horario_fin)
+            `)
+            .order('fecha_hora', { ascending: true });
+
+        // CAMBIO CLAVE: Si 'start' y 'end' están presentes, aplicamos el filtro de rango
+        if (start && end) {
+            // Validamos los parámetros de la query
+            const validatedQuery = citasRangeSchema.parse({ start, end });
+            
+            console.log(`-> /api/citas (RANGO): ${validatedQuery.start} a ${validatedQuery.end}`);
+            
+            // Aplicamos los filtros a la consulta de Supabase
+            query = query.gte('fecha_hora', validatedQuery.start)
+                         .lte('fecha_hora', validatedQuery.end);
+        } else {
+            console.log("-> /api/citas (TODAS)");
         }
+
+        // Ejecutamos la consulta (con o sin filtros)
+        const { data, error } = await query;
+
+        if (error) throw error;
+        
         console.log(`✅ /api/citas: Citas encontradas: ${data.length}`);
         res.status(200).json(data);
+
     } catch (error) {
-        console.error(`Error en /api/citas: ${error.message}`);
-        res.status(500).json({ error: 'Error al obtener todas las citas.', details: error.message });
+        if (error instanceof z.ZodError) {
+            return res.status(400).json({ error: 'Parámetros de rango (start/end) inválidos', details: error.errors });
+        }
+        console.error("Error al obtener citas:", error.message);
+        res.status(500).json({ error: 'No se pudieron obtener las citas.', details: error.message });
     }
 });
 
+// <-- AVISO: El endpoint /api/citas-range ya no es necesario y ha sido eliminado -->
 
-// --- Endpoints de CLIENTES ---
-app.patch('/api/clientes/:id', authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    try {
-        const validatedId = idSchema.parse(Number(id));
-        const validatedData = clienteUpdateSchema.parse(req.body);
-
-        if (Object.keys(validatedData).length === 0) return res.status(400).json({ error: 'No se proporcionaron datos para actualizar.' });
-        
-        const { data, error } = await supabase.from('clientes').update(validatedData).eq('id', validatedId).select().single();
-        if (error) throw error;
-        res.status(200).json(data);
-    } catch (error) {
-        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos inválidos', details: error.errors });
-        console.error(`Error al hacer PATCH en cliente ${id}:`, error.message);
-        res.status(500).json({ error: 'No se pudo actualizar el cliente.', details: error.message });
-    }
-});
-
-// --- Endpoints de DOCTORES ---
-app.post('/api/doctores', authenticateToken, async (req, res) => {
-    try {
-        const validatedData = doctorSchema.parse(req.body);
-        const { data, error } = await supabase.from('doctores').insert(validatedData).select().single();
-        if (error) throw error;
-        res.status(201).json(data);
-    } catch (error) {
-        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de doctor inválidos', details: error.errors });
-        console.error("Error al crear doctor:", error.message);
-        res.status(500).json({ error: 'No se pudo crear el doctor.', details: error.message });
-    }
-});
-
-app.patch('/api/doctores/:id', authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    try {
-        const validatedId = idSchema.parse(Number(id));
-        const validatedData = doctorSchema.partial().parse(req.body);
-
-        const updateData = Object.fromEntries(Object.entries(validatedData).filter(([_, v]) => v !== null && v !== undefined));
-        if (Object.keys(updateData).length === 0) return res.status(400).json({ error: 'No se proporcionaron datos válidos.' });
-        
-        const { data, error } = await supabase.from('doctores').update(updateData).eq('id', validatedId).select().single();
-        if (error) throw error;
-        res.status(200).json(data);
-    } catch (error) {
-        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de doctor inválidos', details: error.errors });
-        console.error(`Error al actualizar doctor ${id}:`, error.message);
-        res.status(500).json({ error: 'No se pudo actualizar el doctor.', details: error.message });
-    }
-});
-
-// --- Endpoints de CITAS ---
+// POST (Crear nueva cita)
 app.post('/api/citas', authenticateToken, async (req, res) => {
+    console.log("-> Recibida petición en POST /api/citas");
     try {
-        const validatedData = citaCreateSchema.parse(req.body);
-        let clienteId = validatedData.cliente_id;
+        const citaData = nuevaCitaSchema.parse(req.body);
+        let clienteId = citaData.cliente_id;
 
-        if (!clienteId && validatedData.new_client_name && validatedData.new_client_dni) {
+        // Lógica para crear nuevo cliente si es necesario
+        if (citaData.new_client_name && citaData.new_client_dni) {
+            console.log("Creando nuevo cliente...");
             const { data: newClient, error: clientError } = await supabase
                 .from('clientes')
                 .insert({
-                    nombre: validatedData.new_client_name,
-                    dni: validatedData.new_client_dni,
-                    telefono: validatedData.new_client_telefono || '',
-                    activo: true
+                    nombre: citaData.new_client_name,
+                    dni: citaData.new_client_dni,
+                    telefono: citaData.new_client_telefono || null,
+                    activo: true, // Bot activado por defecto
+                    solicitud_de_secretaría: false
                 })
                 .select('id')
                 .single();
             
-            if (clientError) {
-                if (clientError.code === '23505') { 
-                    return res.status(409).json({ error: 'Ya existe un cliente con ese DNI.', details: clientError.message });
-                }
-                throw clientError;
-            }
+            if (clientError) throw clientError;
             clienteId = newClient.id;
         } else if (!clienteId) {
-            return res.status(400).json({ error: 'Debe seleccionar un cliente existente o crear uno nuevo.' });
+            return res.status(400).json({ error: 'Debe proporcionar un cliente_id o datos de nuevo cliente.' });
         }
-        
-        const { data, error } = await supabase
+
+        // Crear la cita
+        const { data: nuevaCita, error: citaError } = await supabase
             .from('citas')
             .insert({
                 cliente_id: clienteId,
-                doctor_id: validatedData.doctor_id,
-                fecha_hora: validatedData.fecha_hora,
-                timezone: validatedData.timezone || null, 
-                descripcion: validatedData.descripcion,
-                estado: validatedData.estado,
-                duracion_minutos: validatedData.duracion_minutos
+                doctor_id: citaData.doctor_id,
+                fecha_hora: citaData.fecha_hora,
+                timezone: citaData.timezone,
+                descripcion: citaData.descripcion,
+                duracion_minutos: citaData.duracion_minutos,
+                estado: citaData.estado
             })
             .select(`
-                id, fecha_hora, timezone, descripcion, estado, duracion_minutos,
+                id, fecha_hora, descripcion, estado, duracion_minutos, timezone,
                 cliente:clientes (id, nombre, dni),
-                doctor:doctores (id, nombre, especialidad)
+                doctor:doctores (id, nombre, especialidad, activo, horario_inicio, horario_fin)
             `)
             .single();
-        
-        if (error) throw error;
-        res.status(201).json(data);
+
+        if (citaError) throw citaError;
+
+        console.log(`✅ Nueva cita creada con ID: ${nuevaCita.id}`);
+        res.status(201).json(nuevaCita);
+
     } catch (error) {
         if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de cita inválidos', details: error.errors });
+        if (error.code === '23505') return res.status(409).json({ error: 'Conflicto: Ya existe un cliente con ese DNI.', details: error.message });
         console.error("Error al crear la cita:", error.message);
         res.status(500).json({ error: 'No se pudo crear la cita.', details: error.message });
     }
 });
 
+// PATCH (Actualizar cita)
 app.patch('/api/citas/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    console.log(`-> Recibida petición en PATCH /api/citas/${id}`);
     try {
         const validatedId = idSchema.parse(Number(id));
-        const validatedData = citaUpdateSchema.parse(req.body);
+        const dataToUpdate = updateCitaSchema.parse(req.body);
 
-        if (Object.keys(validatedData).length === 0) return res.status(400).json({ error: 'No se proporcionaron datos.' });
-        
         const { data, error } = await supabase
             .from('citas')
-            .update(validatedData)
+            .update(dataToUpdate)
             .eq('id', validatedId)
             .select(`
-                id, fecha_hora, timezone, descripcion, estado, duracion_minutos,
+                id, fecha_hora, descripcion, estado, duracion_minutos, timezone,
                 cliente:clientes (id, nombre, dni),
-                doctor:doctores (id, nombre, especialidad)
+                doctor:doctores (id, nombre, especialidad, activo, horario_inicio, horario_fin)
             `)
             .single();
             
         if (error) throw error;
         if (!data) return res.status(404).json({ error: 'Cita no encontrada.' });
+        
+        console.log(`✅ Cita ${id} actualizada.`);
         res.status(200).json(data);
     } catch (error) {
         if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de actualización inválidos', details: error.errors });
@@ -382,12 +356,16 @@ app.patch('/api/citas/:id', authenticateToken, async (req, res) => {
     }
 });
 
+// DELETE (Eliminar cita)
 app.delete('/api/citas/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    console.log(`-> Recibida petición en DELETE /api/citas/${id}`);
     try {
         const validatedId = idSchema.parse(Number(id));
         const { error } = await supabase.from('citas').delete().eq('id', validatedId);
         if (error) throw error;
+        
+        console.log(`✅ Cita ${id} eliminada.`);
         res.status(204).send();
     } catch (error) {
         if (error instanceof z.ZodError) return res.status(400).json({ error: 'ID de cita inválido', details: error.errors });
@@ -396,8 +374,99 @@ app.delete('/api/citas/:id', authenticateToken, async (req, res) => {
     }
 });
 
+// =======================================================================================
+// --- GESTIÓN DE CLIENTES Y DOCTORES ---
+// =======================================================================================
 
-// 7. INICIAR SERVIDOR
+// PATCH (Actualizar Cliente - Bot/Secretaría)
+app.patch('/api/clientes/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    console.log(`-> Recibida petición en PATCH /api/clientes/${id}`);
+    try {
+        const validatedId = idSchema.parse(Number(id));
+        const dataToUpdate = clienteSchema.parse(req.body);
+
+        const { data, error } = await supabase
+            .from('clientes')
+            .update(dataToUpdate)
+            .eq('id', validatedId)
+            .select()
+            .single();
+        
+        if (error) throw error;
+        if (!data) return res.status(404).json({ error: 'Cliente no encontrado.' });
+        
+        console.log(`✅ Cliente ${id} actualizado.`);
+        res.status(200).json(data);
+    } catch (error) {
+        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de actualización inválidos', details: error.errors });
+        console.error("Error al actualizar cliente:", error.message);
+        res.status(500).json({ error: 'No se pudo actualizar el cliente.', details: error.message });
+    }
+});
+
+// POST (Crear Doctor)
+app.post('/api/doctores', authenticateToken, async (req, res) => {
+    console.log("-> Recibida petición en POST /api/doctores");
+    try {
+        const dataToInsert = doctorSchema.parse(req.body);
+        
+        const { data, error } = await supabase
+            .from('doctores')
+            .insert(dataToInsert)
+            .select()
+            .single();
+
+        if (error) throw error;
+        
+        console.log(`✅ Doctor creado con ID: ${data.id}`);
+        res.status(201).json(data);
+    } catch (error) {
+        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de doctor inválidos', details: error.errors });
+        console.error("Error al crear doctor:", error.message);
+        res.status(500).json({ error: 'No se pudo crear el doctor.', details: error.message });
+    }
+});
+
+// PATCH (Actualizar Doctor)
+app.patch('/api/doctores/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    console.log(`-> Recibida petición en PATCH /api/doctores/${id}`);
+    try {
+        const validatedId = idSchema.parse(Number(id));
+        const dataToUpdate = updateDoctorSchema.parse(req.body);
+
+        const { data, error } = await supabase
+            .from('doctores')
+            .update(dataToUpdate)
+            .eq('id', validatedId)
+            .select()
+            .single();
+
+        if (error) throw error;
+        if (!data) return res.status(404).json({ error: 'Doctor no encontrado.' });
+        
+        console.log(`✅ Doctor ${id} actualizado.`);
+        res.status(200).json(data);
+    } catch (error) {
+        if (error instanceof z.ZodError) return res.status(400).json({ error: 'Datos de actualización inválidos', details: error.errors });
+        console.error("Error al actualizar doctor:", error.message);
+        res.status(500).json({ error: 'No se pudo actualizar el doctor.', details: error.message });
+    }
+});
+
+// =======================================================================================
+// --- FASE C: ENDPOINTS DE STORAGE (A implementar) ---
+// =======================================================================================
+// POST /api/files/generate-upload-url
+// POST /api/files/confirm-upload
+// GET /api/files/:clienteId
+// POST /api/files/generate-download-url
+
+
+// =======================================================================================
+// 9. INICIO DEL SERVIDOR
+// =======================================================================================
 app.listen(port, () => {
-    console.log(`Servidor Vintex v3.0 (SCALABLE) corriendo en http://localhost:${port}`);
+    console.log(`\n🚀 Servidor Vintex Clinic v3.1 escuchando en http://localhost:${port}`);
 });
